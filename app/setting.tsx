@@ -1,7 +1,10 @@
 // app/setting.tsx
+import { auth, db } from "@/firebaseConfig";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
-import React, { useMemo, useState } from "react";
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, setDoc, Timestamp } from 'firebase/firestore';
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -26,7 +29,7 @@ type Plan = {
   createdAt?: string;
 };
 
-type PlannerBlock = {
+export type PlannerBlock = {
   start?: string; // "HH:mm"
   title: string;
   subject?: string;
@@ -35,7 +38,7 @@ type PlannerBlock = {
   note?: string;
 };
 
-type PlannerJSON = {
+export type PlannerJSON = {
   summary?: string[];
   totalMinutes?: number;
   blocks: PlannerBlock[];
@@ -90,13 +93,12 @@ export default function SettingScreen() {
     const lines =
       plans.length > 0
         ? plans
-            .map(
-              (p, i) =>
-                `${i + 1}. [${p.subject}·${p.priority}] ${p.content} (${p.minutes ?? 0}분${
-                  p.done ? ", 완료" : ""
-                })`
-            )
-            .join("\n")
+          .map(
+            (p, i) =>
+              `${i + 1}. [${p.subject}·${p.priority}] ${p.content} (${p.minutes ?? 0}분${p.done ? ", 완료" : ""
+              })`
+          )
+          .join("\n")
         : "등록된 계획이 없습니다.";
 
     return [
@@ -114,10 +116,17 @@ export default function SettingScreen() {
       "1) 자연스러운 한국어 설명",
       "2) 아래 JSON을 반드시 포함해줘. 꼭 코드블럭으로 감싸.",
       "```json",
-      '{ "summary": ["핵심 요약 문장", "..."], "totalMinutes": 0, "blocks": [ { "start": "HH:mm", "title": "무엇을 할지", "subject": "과목", "priority": "필수|중요|선택", "minutes": 25, "note": "선택" } ] }',
+      '{ "totalMinutes": 0, "blocks": [ { "start": "HH:mm", "title": "무엇을 할지", "subject": "과목", "priority": "필수|중요|선택", "minutes": 25, "note": "선택" } ] }',
       "```",
     ].join("\n");
   };
+  const [uid, setUid] = useState<string | null>(null);
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null));
+    return () => unsub();
+  }, []);
+
+
 
   /** AI 요청 */
   const requestPlanner = async () => {
@@ -139,12 +148,25 @@ export default function SettingScreen() {
         throw new Error(`요청 실패 ${res.status}: ${text}`);
       }
 
+
+
       const data = await res.json();
       const reply =
         (data && (data.reply ?? data.result)) ||
         JSON.stringify(data, null, 2);
 
       const parsed = safeParsePlanner(reply);
+      const String_blocks = JSON.stringify(parsed?.blocks) 
+      if (uid !== null) {
+        await setDoc(doc(db, 'schedule', uid), {
+          summary: parsed?.summary ?? null,
+          totalMinutes: parsed?.totalMinutes,
+          blocks: String_blocks,
+          createdAt: Timestamp.now(),
+        });
+      }
+      console.log("[save]: schedule's document")
+
       setAiJson(parsed);
       setAiRaw(reply);
     } catch (err) {
@@ -181,6 +203,15 @@ export default function SettingScreen() {
       >
         <Text style={S.btnTxt}>목록으로</Text>
       </TouchableOpacity>
+
+      <TouchableOpacity
+        style={[S.btn, { backgroundColor: "#111827" }]}
+        onPress={() => router.push("/timer")}
+        activeOpacity={0.9}
+      >
+        <Text style={S.btnTxt}>타이머로 </Text>
+      </TouchableOpacity>
+      
 
       {loading ? null : aiJson ? (
         <PlannerView data={aiJson} raw={aiRaw} />
