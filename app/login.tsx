@@ -3,12 +3,12 @@ import { useRouter } from 'expo-router';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import React, { useState } from 'react';
 import {
-    Alert,
-    Pressable,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  Alert,
+  Pressable,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { auth } from '../firebaseConfig';
 
@@ -31,7 +31,7 @@ export default function LoginPage() {
     }
     try {
       await signInWithEmailAndPassword(auth, email.trim(), pw);
-      router.push('/home');
+      router.push('/schedule');
     } catch (error: any) {
       Alert.alert('로그인 실패', error?.message ?? '다시 시도해주세요.');
     }

@@ -1,305 +1,359 @@
 // app/setup.tsx
+import { auth } from "@/firebaseConfig";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Picker } from "@react-native-picker/picker";
 import { useRouter } from "expo-router";
-import { doc, serverTimestamp, setDoc } from "firebase/firestore";
-import React, { useMemo, useState } from "react";
+import { onAuthStateChanged } from "firebase/auth";
+import React, { useEffect, useMemo, useState } from "react";
 import {
-    Alert,
-    KeyboardAvoidingView,
-    Platform,
-    ScrollView,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  Alert,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from "react-native";
-import { auth, db } from "../firebaseConfig";
 
-type Importance = 1 | 2 | 3; // 1:높음 2:보통 3:낮음
-type Task = {
+type Priority = "필수" | "중요" | "선택";
+type Plan = {
   id: string;
   subject: string;
-  importance: Importance;
-  plan: string;
+  content: string;
+  priority: Priority;
+  minutes: number;
+  done?: boolean;
+  createdAt?: string;
 };
 
-const SUBJECT_PRESETS = ["수학", "영어", "국어", "과학", "사회"];
+const COLOR = {
+  text: "#0F172A",
+  muted: "#6B7280",
+  border: "#E5E7EB",
+  card: "#FFFFFF",
+  bg: "#FFFFFF",
+  primary: "#2563EB",
+  red: "#EF4444",
+  amber: "#F59E0B",
+  green: "#10B981",
+  chip: "#F3F4F6",
+};
+const P_COLOR: Record<Priority, string> = {
+  필수: COLOR.red,
+  중요: COLOR.amber,
+  선택: COLOR.green,
+};
+const SUBJECTS = ["국어", "영어", "수학", "과학", "역사", "사회"];
+
+const keyWithUid = (base: string, uid: string) => `${base}_${uid}`;
 
 export default function SetupPage() {
   const router = useRouter();
 
-  const today = useMemo(() => {
-    const d = new Date();
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    return `${d.getFullYear()}-${mm}-${dd}`;
+  // ✅ 로그인 UID
+  const [uid, setUid] = useState<string | null>(null);
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null));
+    return () => unsub();
   }, []);
 
-  // 총 공부 시간(선택 입력)
-  const [hours, setHours] = useState("2");
-  const [mins, setMins] = useState("0");
+  // 폼 상태
+  const [priority, setPriority] = useState<Priority>("필수");
+  const [subject, setSubject] = useState("국어");
+  const [openSubjects, setOpenSubjects] = useState(false);
+  const [content, setContent] = useState("");
 
-  // 입력 폼
-  const [subject, setSubject] = useState("");
-  const [importance, setImportance] = useState<Importance>(1);
-  const [plan, setPlan] = useState("");
+  // 🔁 시간 Picker (시/분 휠)
+  const HOURS = useMemo(() => Array.from({ length: 7 }, (_, i) => i), []); // 0~6h
+  const MINUTES = useMemo(() => Array.from({ length: 12 }, (_, i) => i * 5), []); // 0..55 step 5
+  const [hour, setHour] = useState(1);
+  const [minute, setMinute] = useState(0);
+  const totalMinutes = hour * 60 + minute;
 
-  // 추가된 목록
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [saving, setSaving] = useState(false);
-
-  const addTask = () => {
-    if (!subject.trim()) return Alert.alert("과목을 입력해주세요.");
-    if (!plan.trim()) return Alert.alert("세부 계획을 입력해주세요.");
-
-    const newTask: Task = {
-      id: `t_${Date.now()}`,
-      subject: subject.trim(),
-      importance,
-      plan: plan.trim(),
-    };
-    setTasks((prev) => [newTask, ...prev]);
-
-    // 초기화
-    setSubject("");
-    setImportance(1);
-    setPlan("");
-  };
-
-  const removeTask = (id: string) => {
-    setTasks((prev) => prev.filter((t) => t.id !== id));
-  };
-
-  const onSave = async () => {
-    const user = auth.currentUser;
-    if (!user) return Alert.alert("로그인이 필요합니다.");
-    if (tasks.length === 0) return Alert.alert("최소 1개의 항목을 추가해주세요.");
-
-    const totalMinutes =
-      (parseInt(hours || "0", 10) || 0) * 60 + (parseInt(mins || "0", 10) || 0);
-
-    try {
-      setSaving(true);
-      await setDoc(doc(db, "users", user.uid, "days", today), {
-        date: today,
-        prefs: { totalMinutes }, // 0이면 미입력으로 간주
-        tasks: tasks.map(({ id, subject, importance, plan }) => ({
-          id,
-          subject,
-          importance, // 1:높음 2:보통 3:낮음
-          plan,
-        })),
-        schedule: [], // AI 배치 전
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-
-      router.push("/aischedule");
-    } catch (e: any) {
-      Alert.alert("저장 실패", e?.message ?? "다시 시도해주세요.");
-    } finally {
-      setSaving(false);
+  // ✅ 저장 (todayPlans + todayPlans_<uid>)
+  const saveTask = async () => {
+    if (!content.trim()) {
+      Alert.alert("입력 필요", "세부계획을 적어주세요.");
+      return;
     }
+    if (totalMinutes <= 0) {
+      Alert.alert("시간 필요", "예상 시간을 1분 이상으로 설정하세요.");
+      return;
+    }
+
+    const id = `${Date.now()}`;
+    const newPlan: Plan = {
+      id,
+      subject,
+      content: content.trim(),
+      priority,
+      minutes: totalMinutes,
+      done: false,
+      createdAt: new Date().toISOString(),
+    };
+
+    const raw = await AsyncStorage.getItem("todayPlans");
+    const list: Plan[] = raw ? JSON.parse(raw) : [];
+    const next = [newPlan, ...list];
+    await AsyncStorage.setItem("todayPlans", JSON.stringify(next));
+
+    if (uid) {
+      const rawU = await AsyncStorage.getItem(keyWithUid("todayPlans", uid));
+      const listU: Plan[] = rawU ? JSON.parse(rawU) : [];
+      const nextU = [newPlan, ...listU];
+      await AsyncStorage.setItem(keyWithUid("todayPlans", uid), JSON.stringify(nextU));
+    }
+
+    router.replace("/list");
   };
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.select({ ios: "padding", android: undefined })}
-      style={{ flex: 1, backgroundColor: "#fff" }}
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={{ paddingBottom: 30 }}
+      showsVerticalScrollIndicator={false}
     >
-      <ScrollView
-        contentContainerStyle={{ padding: 24, paddingBottom: 40 }}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* 헤더 */}
-        <Text style={{ fontSize: 24, fontWeight: "800", color: "#111827" }}>
-          사전 설정
-        </Text>
-        <Text style={{ color: "#6B7280", marginTop: 6 }}>
-          오늘의 공부 시간을 정하고, 할 일을 추가하세요.
-        </Text>
+      <Text style={styles.title}>공부 항목 추가</Text>
 
-        {/* 총 공부 시간 */}
-        <View style={card}>
-          <Text style={sectionTitle}>오늘 총 공부 시간 (선택)</Text>
-          <View style={{ flexDirection: "row", gap: 12 }}>
-            <TextInput
-              value={hours}
-              onChangeText={(t) => setHours(t.replace(/[^0-9]/g, ""))}
-              keyboardType="number-pad"
-              placeholder="시간"
-              style={[input, { flex: 1 }]}
-            />
-            <TextInput
-              value={mins}
-              onChangeText={(t) => setMins(t.replace(/[^0-9]/g, ""))}
-              keyboardType="number-pad"
-              placeholder="분"
-              style={[input, { flex: 1 }]}
-            />
-          </View>
-          <Text style={hint}>예: 2시간 30분 → ‘2’와 ‘30’ 입력</Text>
-        </View>
-
-        {/* 과목/중요도/세부계획 입력 */}
-        <View style={[card, { gap: 12 }]}>
-          <Text style={sectionTitle}>공부할 내용 추가</Text>
-
-          {/* 과목 프리셋 + 직접 입력 */}
-          <Text style={label}>과목</Text>
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-            {SUBJECT_PRESETS.map((name) => (
+      {/* 우선순위 세그먼트 */}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>우선순위</Text>
+        <View style={styles.segmentWrap}>
+          {(["필수", "중요", "선택"] as Priority[]).map((p, idx) => {
+            const selected = p === priority;
+            return (
               <TouchableOpacity
-                key={name}
-                onPress={() => setSubject(name)}
-                style={[chip, subject === name && { backgroundColor: "#3B82F6" }]}
+                key={p}
+                style={[
+                  styles.segmentItem,
+                  idx < 2 && styles.segmentDivider,
+                  selected && {
+                    backgroundColor: `${P_COLOR[p]}14`,
+                    borderColor: P_COLOR[p],
+                  },
+                ]}
+                onPress={() => setPriority(p)}
+                activeOpacity={0.9}
               >
-                <Text
-                  style={{
-                    color: subject === name ? "#fff" : "#374151",
-                    fontWeight: "700",
-                  }}
-                >
-                  {name}
-                </Text>
+                <View style={[styles.dot, { backgroundColor: P_COLOR[p] }]} />
+                <Text style={[styles.segmentTxt, selected && { color: P_COLOR[p], fontWeight: "800" }]}>{p}</Text>
               </TouchableOpacity>
-            ))}
-          </View>
-          <TextInput
-            value={subject}
-            onChangeText={setSubject}
-            placeholder="직접 입력 (예: 한국사)"
-            style={input}
-          />
-
-          {/* 중요도 */}
-          <Text style={label}>중요도</Text>
-          <View style={{ flexDirection: "row", gap: 8 }}>
-            {([1, 2, 3] as const).map((lv) => (
-              <TouchableOpacity
-                key={lv}
-                onPress={() => setImportance(lv)}
-                style={[chip, importance === lv && { backgroundColor: "#3B82F6" }]}
-              >
-                <Text
-                  style={{
-                    color: importance === lv ? "#fff" : "#374151",
-                    fontWeight: "700",
-                  }}
-                >
-                  {lv === 1 ? "높음" : lv === 2 ? "보통" : "낮음"}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {/* 세부 계획 */}
-          <Text style={label}>세부 계획</Text>
-          <TextInput
-            value={plan}
-            onChangeText={setPlan}
-            placeholder="예: 2단원 개념 정리 + 문제 20개"
-            multiline
-            style={[input, { height: 96, textAlignVertical: "top" }]}
-          />
-
-          <TouchableOpacity onPress={addTask} style={primaryBtn}>
-            <Text style={primaryBtnText}>할 일 추가</Text>
-          </TouchableOpacity>
+            );
+          })}
         </View>
+      </View>
 
-        {/* 추가된 리스트 */}
-        {tasks.length > 0 && (
-          <View style={[card, { gap: 8 }]}>
-            <Text style={sectionTitle}>오늘 입력한 할 일</Text>
-            {tasks.map((t) => (
-              <View
-                key={t.id}
-                style={{
-                  backgroundColor: "#fff",
-                  borderRadius: 12,
-                  borderWidth: 1,
-                  borderColor: "#E5E7EB",
-                  padding: 12,
+      {/* 과목 드롭다운 */}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>과목</Text>
+        <TouchableOpacity
+          style={styles.dropdown}
+          onPress={() => setOpenSubjects((o) => !o)}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.dropdownText}>{subject}</Text>
+          <Text style={styles.dropdownCaret}>{openSubjects ? "︿" : "﹀"}</Text>
+        </TouchableOpacity>
+        {openSubjects && (
+          <View style={styles.dropdownList}>
+            {SUBJECTS.map((s) => (
+              <TouchableOpacity
+                key={s}
+                style={styles.dropdownItem}
+                onPress={() => {
+                  setSubject(s);
+                  setOpenSubjects(false);
                 }}
               >
-                <Text style={{ fontWeight: "800", color: "#111827" }}>
-                  {t.subject} · {t.importance === 1 ? "높음" : t.importance === 2 ? "보통" : "낮음"}
+                <Text style={[styles.dropdownItemTxt, s === subject && { color: COLOR.primary, fontWeight: "800" }]}>
+                  {s}
                 </Text>
-                <Text style={{ color: "#6B7280", marginTop: 4 }}>{t.plan}</Text>
-                <TouchableOpacity
-                  onPress={() => removeTask(t.id)}
-                  style={{ alignSelf: "flex-end", marginTop: 8, padding: 6 }}
-                >
-                  <Text style={{ color: "#EF4444", fontWeight: "700" }}>삭제</Text>
-                </TouchableOpacity>
-              </View>
+              </TouchableOpacity>
             ))}
           </View>
         )}
+      </View>
 
-        {/* 저장 & 다음 */}
-        <TouchableOpacity
-          onPress={onSave}
-          disabled={saving}
-          style={[primaryBtn, { backgroundColor: "#10B981", marginTop: 16 }]}
-        >
-          <Text style={primaryBtnText}>
-            {saving ? "저장 중..." : "저장하고 다음으로"}
-          </Text>
-        </TouchableOpacity>
-      </ScrollView>
-    </KeyboardAvoidingView>
+      {/* 세부계획: 한 줄 입력 */}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>세부계획</Text>
+        <TextInput
+          style={styles.singleLine}
+          placeholder="예: 확률 단원 정리 + 기출 10문제"
+          value={content}
+          onChangeText={setContent}
+          numberOfLines={1}
+          multiline={false}
+          returnKeyType="done"
+          maxLength={80}
+        />
+      </View>
+
+      {/* 예상 시간: Picker 휠 (시 : 분) */}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>예상 시간</Text>
+        <View style={styles.pickerRow}>
+          <View style={styles.pickerBox}>
+            <Picker
+              selectedValue={hour}
+              onValueChange={(v) => setHour(v)}
+              style={styles.picker}
+              itemStyle={styles.pickerItem}
+            >
+              {HOURS.map((h) => (
+                <Picker.Item key={h} label={`${h} 시간`} value={h} />
+              ))}
+            </Picker>
+          </View>
+          <Text style={styles.colon}>:</Text>
+          <View style={styles.pickerBox}>
+            <Picker
+              selectedValue={minute}
+              onValueChange={(v) => setMinute(v)}
+              style={styles.picker}
+              itemStyle={styles.pickerItem}
+            >
+              {MINUTES.map((mm) => (
+                <Picker.Item key={mm} label={`${mm} 분`} value={mm} />
+              ))}
+            </Picker>
+          </View>
+        </View>
+        <Text style={styles.totalHint}>
+          현재 선택: {hour > 0 ? `${hour}시간 ` : ""}{minute}분 (총 {totalMinutes}분)
+        </Text>
+      </View>
+
+      {/* 저장 */}
+      <TouchableOpacity style={styles.primaryBtn} onPress={saveTask} activeOpacity={0.9}>
+        <Text style={styles.primaryBtnTxt}>저장</Text>
+      </TouchableOpacity>
+
+      {/* 목록으로 이동 */}
+      <TouchableOpacity
+        style={[styles.primaryBtn, { backgroundColor: "#111827" }]}
+        onPress={() => router.push("/list")}
+        activeOpacity={0.9}
+      >
+        <Text style={styles.primaryBtnTxt}>list으로 가기</Text>
+      </TouchableOpacity>
+    </ScrollView>
   );
 }
 
-/* 스타일 */
-const card = {
-  marginTop: 16,
-  backgroundColor: "#F9FAFB",
-  borderRadius: 16,
-  padding: 16,
-} as const;
+const styles = StyleSheet.create({
+  screen: { flex: 1, backgroundColor: COLOR.bg, padding: 20 },
+  title: { fontSize: 24, fontWeight: "800", color: COLOR.text, marginBottom: 14 },
 
-const sectionTitle = {
-  fontWeight: "800" as const,
-  color: "#111827",
-  marginBottom: 10,
-} as const;
+  /* 공통 카드 */
+  card: {
+    borderWidth: 1,
+    borderColor: COLOR.border,
+    backgroundColor: COLOR.card,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+    ...Platform.select({
+      ios: { shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } },
+      android: { elevation: 2 },
+    }),
+  },
+  sectionTitle: { fontSize: 15, fontWeight: "800", color: COLOR.text, marginBottom: 10 },
 
-const label = { color: "#374151", fontWeight: "700" as const } as const;
-const hint = { color: "#6B7280", marginTop: 8 } as const;
+  /* 드롭다운 */
+  dropdown: {
+    borderWidth: 1,
+    borderColor: COLOR.border,
+    backgroundColor: COLOR.card,
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  dropdownText: { fontSize: 15, fontWeight: "800", color: COLOR.text },
+  dropdownCaret: { fontSize: 18, color: COLOR.muted },
+  dropdownList: {
+    borderWidth: 1,
+    borderColor: COLOR.border,
+    backgroundColor: COLOR.card,
+    borderRadius: 12,
+    overflow: "hidden",
+    marginTop: 6,
+  },
+  dropdownItem: { paddingVertical: 12, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: COLOR.border },
+  dropdownItemTxt: { fontSize: 16, color: COLOR.text },
 
-const input = {
-  backgroundColor: "#fff",
-  borderRadius: 12,
-  borderWidth: 1,
-  borderColor: "#E5E7EB",
-  paddingHorizontal: 14,
-  paddingVertical: 12,
-  fontSize: 16 as const,
-} as const;
+  /* 세부계획: 한 줄 */
+  singleLine: {
+    borderWidth: 1,
+    borderColor: COLOR.border,
+    backgroundColor: COLOR.card,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    fontSize: 15,
+  },
 
-const chip = {
-  paddingHorizontal: 14,
-  paddingVertical: 8,
-  borderRadius: 9999,
-  backgroundColor: "#E5E7EB",
-} as const;
+  /* Picker 레이아웃 */
+  pickerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingHorizontal: 4,
+  },
+  pickerBox: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: COLOR.border,
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: "#FFF",
+  },
+  picker: {
+    width: "100%",
+    height: 160, // 휠 높이
+  },
+  pickerItem: {
+    fontSize: 18,
+  } as any,
+  colon: { width: 18, textAlign: "center", fontSize: 18, color: COLOR.muted },
 
-const primaryBtn = {
-  height: 48,
-  borderRadius: 14,
-  backgroundColor: "#3B82F6",
-  alignItems: "center",
-  justifyContent: "center",
-  shadowColor: "#000",
-  shadowOpacity: 0.08,
-  shadowRadius: 6,
-  shadowOffset: { width: 0, height: 3 },
-} as const;
+  totalHint: { marginTop: 10, color: COLOR.muted, fontSize: 13 },
 
-const primaryBtnText = {
-  color: "#fff",
-  fontWeight: "800" as const,
-  fontSize: 16 as const,
-} as const;
+  /* 우선순위 세그먼트 */
+  segmentWrap: {
+    flexDirection: "row",
+    borderWidth: 1,
+    borderColor: COLOR.border,
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: COLOR.card,
+  },
+  segmentItem: {
+    flex: 1,
+    paddingVertical: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    borderColor: COLOR.border,
+  },
+  segmentDivider: { borderRightWidth: 1, borderRightColor: COLOR.border },
+  segmentTxt: { fontWeight: "700", color: COLOR.text },
+  dot: { width: 10, height: 10, borderRadius: 999, marginBottom: 4 },
+
+  /* 버튼 */
+  primaryBtn: {
+    backgroundColor: COLOR.primary,
+    borderRadius: 12,
+    paddingVertical: 14,
+    marginTop: 16,
+    ...Platform.select({
+      ios: { shadowColor: "#000", shadowOpacity: 0.08, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } },
+      android: { elevation: 3 },
+    }),
+  },
+  primaryBtnTxt: { color: "#fff", textAlign: "center", fontWeight: "900", fontSize: 16 },
+});
