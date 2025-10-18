@@ -244,7 +244,7 @@ export default function SetupPage() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: COLOR.bg, padding: 20 },
-  title: { fontSize: 24, fontWeight: "800", color: COLOR.text, marginBottom: 14 },
+  title: { fontSize: 24, fontWeight: "800", color: COLOR.text, marginBottom: 20, marginTop: 60 },
 
   /* 공통 카드 */
   card: {

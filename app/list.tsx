@@ -171,7 +171,7 @@ export default function TaskListScreen() {
 
       {/* 하단: AI에게 요청 */}
       <View style={styles.bottomBar}>
-        <TouchableOpacity style={styles.aiBtn} onPress={() => router.push("/setting")} activeOpacity={0.9}>
+        <TouchableOpacity style={styles.aiBtn}  onPress={() => router.push({ pathname: "/setting", params: { auto: "1" } })} activeOpacity={0.9}>
           <Text style={styles.aiBtnTxt}>AI에게 요청</Text>
         </TouchableOpacity>
       </View>

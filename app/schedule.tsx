@@ -6,7 +6,7 @@ import { useRouter } from "expo-router";
 import { onAuthStateChanged } from "firebase/auth";
 import React, { useEffect, useMemo, useState } from "react";
 import {
-    Alert, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View,
+  Alert, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View,
 } from "react-native";
 
 type Day = 0|1|2|3|4|5|6; // 0=일
@@ -120,7 +120,7 @@ export default function SchedulePage() {
         await AsyncStorage.removeItem(keyWithUid(EX_KEY, uid));
       }
     }
-    router.replace("/list"); // 저장 후 목록으로
+    router.replace("/"); // 저장 후 목록으로
   };
 
   const summaryForDay = (d: Day)=>{

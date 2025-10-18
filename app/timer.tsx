@@ -1,254 +1,291 @@
+// app/session/timer.tsx
 import { auth, db } from '@/firebaseConfig';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
-import React, { useEffect, useRef, useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { PlannerBlock } from './setting';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-type PlannerData = {
-    summary?: string;
-    totalMinutes: number;
-    blocks: string;
-    createdAt: object;
-    id: string;
+type Priority = '필수' | '중요' | '선택';
+
+type PlanItem = {
+  id?: string;
+  subject: string;
+  detail?: string;
+  minutes: number;
+  priority?: Priority;
+  startAt?: string;
+  cooldownMinutes?: number;
 };
 
-function formatStudyTime(totalSec: number) {
-    const safe = Math.max(0, Math.floor(totalSec));
-    const h = Math.floor(safe / 3600);
-    const m = Math.floor((safe % 3600) / 60);
-    const s = safe % 60;
-    if (h > 0) return `${h}시간 ${m}분 ${s}초`;
-    return `${m}분 ${s}초`;
+type StudyRecordDraft = {
+  phase: 'study' | 'cooldown';
+  subject: string;
+  detail?: string;
+  priority?: Priority;
+  plannedMinutes: number;
+  elapsedSeconds: number;
+  completed: boolean;
+  endedAtISO: string;
+  index: number;
+};
+
+const AI_PLAN_KEY = '@aiPlanV1';
+const STUDY_RECORDS_DRAFT_KEY = '@studyRecordsDraftV1';
+
+function mmss(sec: number) {
+  const m = Math.floor(Math.max(0, sec) / 60);
+  const s = Math.max(0, sec) % 60;
+  return `${m}분 ${String(s).padStart(2, '0')}초`;
 }
 
-export default function FlowPlayer() {
-    const router = useRouter();
-    const [subj, setSubj] = useState<string | undefined>(undefined)
-    const [cont, setCont] = useState('')
-    const [targetMinutes, setTargetMinutes] = useState<number>(0)
-    const [plan, setPlan] = useState([])
-    const [queueRaw, setQuereRaw] = useState([])
-    const [uid, setUid] = useState<string | null>(null);
-    const [ready, setReady] = useState(true);
-    const [running, setRunning] = useState(false);
+// --- PlanItem 변환 함수 ---
+function toPlanItem(b: any, i: number): PlanItem {
+  return {
+    id: b.id ?? `p-${i}`,
+    subject: String(b.subject ?? b.title ?? '기타'),
+    detail: String(b.detail ?? b.content ?? ''),
+    minutes: Math.max(1, Number(b.minutes ?? b.duration ?? 1)),
+    priority: b.priority as Priority | undefined,
+    startAt: b.startAt ?? b.start_time ?? undefined,
+    cooldownMinutes: Math.max(0, Number(b.cooldownMinutes ?? b.cooldown ?? 0)),
+  };
+}
 
-    // 타이머 상태
-    const [seconds, setSeconds] = useState<number>(0);
+export default function TimerScreen() {
+  const router = useRouter();
+  const [uid, setUid] = useState<string | null>(null);
+  const [plan, setPlan] = useState<PlanItem[]>([]);
+  const [index, setIndex] = useState(0);
+  const [ready, setReady] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [seconds, setSeconds] = useState(0);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-    useEffect(() => {
-        const unsub = onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null));
-        return () => unsub();
-    }, []);
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null));
+    return () => unsub();
+  }, []);
 
-    const getData = async () => {
-        if (uid === null) return
-        const ref = await getDoc(doc(db, 'schedule', uid))
-        const data = ref.exists() ? { id: ref.id, ...ref.data()} as PlannerData : null
+  const current = useMemo(() => {
+    if (!plan.length) return null;
+    return plan[index];
+  }, [plan, index]);
 
-        if (data === null) return;
- 
-        const parsedBlocks = JSON.parse(data.blocks) as PlannerBlock[]
-    }
-
-    useEffect(() => {
-        getData()
-    }, [])
-
-
-    //   const subj = Array.isArray(subject) ? subject[0] : subject || '기타';
-    //   const cont = Array.isArray(content) ? content[0] : content || '';
-    //   const minsRaw = Array.isArray(minutes) ? minutes[0] : minutes;"
-    //   const targetMinutes = minsRaw ? Number(minsRaw) : NaN; // 없을 수 있음
-    //   const isCountdown = Number.isFinite(targetMinutes) && targetMinutes > 0; // true면 카운트다운
-    //   const plan = Array.isArray(planId) ? planId[0] : planId || '';"
-    //   const queueRaw = Array.isArray(queue) ? queue[0] : queue || '';
-
-    // 공통 상태
-
-    const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-    // label/표시용 formatter
-    const formatMMSS = (s: number) => {
-        const mm = Math.floor(Math.max(0, s) / 60);
-        const ss = Math.max(0, s) % 60;
-        return `${mm}분 ${String(ss).padStart(2, '0')}초`;
-    };
-
-    function stopTimer() {
-        if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
+  // ✅ AI 계획 불러오기 + 시간순 정렬
+  useEffect(() => {
+    if (!uid) return;
+    (async () => {
+      try {
+        let arr: any[] | null = null;
+        const local = await AsyncStorage.getItem(AI_PLAN_KEY);
+        if (local) arr = JSON.parse(local);
+        else {
+          const snap = await getDoc(doc(db, 'schedule', uid));
+          if (snap.exists()) {
+            const data = snap.data() as any;
+            if (Array.isArray(data.blocks)) arr = data.blocks;
+            else if (typeof data.blocks === 'string') arr = JSON.parse(data.blocks);
+          }
         }
+        if (!arr || arr.length === 0) {
+          Alert.alert('계획 없음', 'AI가 만든 공부 계획이 없습니다.');
+          router.replace('/home' as any);
+          return;
+        }
+
+        // 🔹 startAt 기준 정렬
+        const parsed = arr.map(toPlanItem).sort((a, b) => {
+          const toMin = (t?: string) => {
+            if (!t) return 24 * 60;
+            const [h, m] = t.split(':').map(Number);
+            return h * 60 + m;
+          };
+          return toMin(a.startAt) - toMin(b.startAt);
+        });
+
+        setPlan(parsed);
+        setIndex(0);
+        setReady(true);
+        setRunning(false);
+      } catch (e) {
+        console.error(e);
+        Alert.alert('오류', '계획을 불러오는 중 문제가 발생했습니다.');
+      }
+    })();
+  }, [uid]);
+
+  // 타이머
+  useEffect(() => {
+    if (!running) return;
+    if (intervalRef.current) return;
+
+    intervalRef.current = setInterval(() => {
+      setSeconds((prev) => {
+        if (prev <= 1) {
+          stopTimer();
+          setTimeout(() => finishStep(true), 0);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => stopTimer();
+  }, [running]);
+
+  const stopTimer = () => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
     }
+  };
 
-    // 타이머 루프
-    useEffect(() => {
-        if (!running) return;
-        if (intervalRef.current) return;
+  const pushDraft = async (rec: StudyRecordDraft) => {
+    const raw = await AsyncStorage.getItem(STUDY_RECORDS_DRAFT_KEY);
+    const list: StudyRecordDraft[] = raw ? JSON.parse(raw) : [];
+    list.push(rec);
+    await AsyncStorage.setItem(STUDY_RECORDS_DRAFT_KEY, JSON.stringify(list));
+  };
 
-        intervalRef.current = setInterval(() => {
-            setSeconds((prev) => {
-                // 카운트다운: 0이 되면 종료
-                if (prev <= 1) {
-                    stopTimer();
-                    // finish는 setState 이후로 호출
-                    setTimeout(() => finish(prev <= 0 ? 0 : prev - 1, true), 0);
-                    return 0;
-                }
-                return prev - 1;
-            });
-        }, 1000);
+  const finishStep = async (auto: boolean) => {
+    if (!current) return;
+    const planned = current.minutes * 60;
+    const elapsed = planned - seconds;
 
-        return () => {
-            stopTimer();
-        };
-    }, [running]);
-
-    // 시작 시 seconds 초기화
-    const onStart = () => {
-        setReady(false);
-        setSeconds(Math.floor(targetMinutes * 60));
-        setRunning(true);
+    const record: StudyRecordDraft = {
+      phase: 'study',
+      subject: current.subject,
+      detail: current.detail,
+      priority: current.priority,
+      plannedMinutes: current.minutes,
+      elapsedSeconds: elapsed,
+      completed: auto,
+      endedAtISO: new Date().toISOString(),
+      index,
     };
+    await pushDraft(record);
 
-    async function finish(currentSeconds?: number, autoEnd = false) {
-        stopTimer();
-
-        // 기록 시간 계산
-        let total: number;
-        const target = Math.floor((Number.isFinite(targetMinutes) ? targetMinutes : 0) * 60);
-        const leftNow = typeof currentSeconds === 'number' ? currentSeconds : seconds;
-        total = Math.max(0, target - Math.max(0, leftNow));
-
-        const timeStr = formatStudyTime(total);
-        await AsyncStorage.setItem('subject', String(subj));
-        await AsyncStorage.setItem('content', String(cont));
-        await AsyncStorage.setItem('studyTime', timeStr);
-        await AsyncStorage.setItem('memo', '');
-
-        // router.replace({
-        //     pathname: '/session/summary',
-        //     params: {
-        //         backTo: '/plan/batch',
-        //         donePlanId: String(plan),
-        //         queue: String(queueRaw || ''),
-        //         mode: 'flow',
-        //         ...(autoEnd ? {} : {}), // 유지
-        //     },
-        // } as any);
+    const next = index + 1;
+    if (next >= plan.length) {
+      Alert.alert('완료', '모든 공부를 마쳤어요!', [
+        { text: '확인', onPress: () => router.replace('/review' as any) },
+      ]);
+      return;
     }
+    setIndex(next);
+    setReady(true);
+    setRunning(false);
+  };
 
-    // ⭐ 임시저장 후 나가기(진행 중 화면) → 곧장 홈으로
-    async function saveDraftAndExit() {
-        stopTimer();
+  const onStart = () => {
+    if (!current) return;
+    setSeconds(current.minutes * 60);
+    setReady(false);
+    setRunning(true);
+  };
 
-        let elapsed: number;
-        const target = Math.floor((Number.isFinite(targetMinutes) ? targetMinutes : 0) * 60);
-        elapsed = Math.max(0, target - Math.max(0, seconds));
+  const toggleRun = () => setRunning((r) => !r);
 
-        const timeStr = formatStudyTime(elapsed);
-        await AsyncStorage.setItem('subject', String(subj));
-        await AsyncStorage.setItem('content', String(cont));
-        await AsyncStorage.setItem('studyTime', timeStr);
-        await AsyncStorage.setItem('memo', '[임시저장] 진행 중 나가기');
-
-        // ✅ summary 거치지 않고 홈으로 바로 이동
-        router.replace('/home' as any);
-    }
-
-    // ✅ 시작 전(소개 화면)에서도 임시저장 후 나가기 → 곧장 홈
-    async function saveDraftAndExitFromReady() {
-        const timeStr = formatStudyTime(0); // 아직 시작 전이므로 0초
-        await AsyncStorage.setItem('subject', String(subj));
-        await AsyncStorage.setItem('content', String(cont));
-        await AsyncStorage.setItem('studyTime', timeStr);
-        await AsyncStorage.setItem('memo', '[임시저장] 시작 전 나가기');
-
-        // ✅ summary 거치지 않고 홈으로 바로 이동
-        router.replace('/home' as any);
-    }
-
-    // 화면
-    if (ready) {
-        return (
-            <View style={styles.page}>
-                <Text style={styles.title}>오늘의 공부 시작</Text>
-                <View style={styles.card}>
-                    <Text style={styles.meta}>과목: {subj}</Text>
-                    {!!cont && <Text style={styles.meta}>내용: {cont}</Text>}
-                    <Text style={[styles.meta, { fontWeight: '700', marginTop: 6 }]}>
-                        목표 {targetMinutes}분 (카운트다운)
-                    </Text>
-                </View>
-
-                <TouchableOpacity onPress={onStart} style={styles.readyBtn}>
-                    <Text style={styles.readyText}>시작하기</Text>
-                </TouchableOpacity>
-
-                {/* ✅ 시작 전에도 임시저장 후 나가기 */}
-                <TouchableOpacity
-                    onPress={saveDraftAndExitFromReady}
-                    style={[styles.readyBtn, { backgroundColor: '#6B7280', marginTop: 10 }]}
-                >
-                    <Text style={styles.readyText}>임시저장 후 나가기</Text>
-                </TouchableOpacity>
-            </View>
-        );
-    }
-
+  if (!current)
     return (
-        <View style={styles.page}>
-            <Text style={styles.title}>진행 중</Text>
-            <View style={styles.infoRow}>
-                <Text style={styles.infoText}>{subj}</Text>
-                {!!cont && <Text style={[styles.infoText, { color: '#6B7280' }]} numberOfLines={1}>· {cont}</Text>}
-            </View>
-
-            <View style={styles.nowBox}>
-                <Text style={styles.nowLabel}>{'남은 시간'}</Text>
-                <Text style={styles.nowTimer}>{formatMMSS(seconds)}</Text>
-
-                <View style={styles.btnRow}>
-                    <TouchableOpacity onPress={() => setRunning((r) => !r)} style={[styles.btn, styles.primary]}>
-                        <Text style={styles.btnText}>{running ? '일시정지' : '재개'}</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity onPress={() => finish()} style={[styles.btn, styles.blue]}>
-                        <Text style={styles.btnText}>마치기</Text>
-                    </TouchableOpacity>
-                </View>
-
-                {/* ⭐ 임시저장 후 나가기 → 홈 */}
-                <TouchableOpacity onPress={saveDraftAndExit} style={[styles.btn, styles.gray, { marginTop: 8 }]}>
-                    <Text style={styles.btnText}>임시저장 후 나가기</Text>
-                </TouchableOpacity>
-            </View>
-        </View>
+      <View style={styles.page}>
+        <Text style={styles.title}>진행할 공부가 없어요</Text>
+        <TouchableOpacity onPress={() => router.replace('/home' as any)} style={[styles.btn, styles.primary]}>
+          <Text style={styles.btnText}>홈으로</Text>
+        </TouchableOpacity>
+      </View>
     );
+
+  // --- 시작 전 화면 ---
+  if (ready)
+    return (
+      <ScrollView style={styles.page}>
+        <Text style={styles.title}>오늘의 공부</Text>
+        <View style={styles.card}>
+          <Text style={styles.step}>
+            [{index + 1}/{plan.length}]
+          </Text>
+          <Text style={styles.label}>과목</Text>
+          <Text style={styles.value}>{current.subject}</Text>
+          {!!current.detail && (
+            <>
+              <Text style={[styles.label, { marginTop: 10 }]}>세부계획</Text>
+              <Text style={styles.value}>{current.detail}</Text>
+            </>
+          )}
+          {!!current.priority && (
+            <>
+              <Text style={[styles.label, { marginTop: 10 }]}>우선순위</Text>
+              <Text style={styles.value}>{current.priority}</Text>
+            </>
+          )}
+          {!!current.startAt && (
+            <>
+              <Text style={[styles.label, { marginTop: 10 }]}>시작시간</Text>
+              <Text style={styles.value}>{current.startAt}</Text>
+            </>
+          )}
+          <Text style={[styles.label, { marginTop: 10 }]}>목표 시간</Text>
+          <Text style={[styles.value, { fontWeight: '700' }]}>{current.minutes}분</Text>
+        </View>
+
+        <TouchableOpacity onPress={onStart} style={[styles.btn, styles.primary, { alignSelf: 'center', width: 180 }]}>
+          <Text style={styles.btnText}>시작하기</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+
+  // --- 진행 중 화면 ---
+  return (
+    <View style={styles.page}>
+      <Text style={styles.title}>공부 중</Text>
+      <Text style={styles.subject}>{current.subject}</Text>
+      {!!current.detail && <Text style={styles.detail}>{current.detail}</Text>}
+      <View style={styles.timerBox}>
+        <Text style={styles.timer}>{mmss(seconds)}</Text>
+      </View>
+
+      <View style={styles.btnRow}>
+        <TouchableOpacity onPress={toggleRun} style={[styles.btn, styles.primary, { flex: 1 }]}>
+          <Text style={styles.btnText}>{running ? '일시정지' : '재개'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={() => finishStep(false)} style={[styles.btn, styles.blue, { flex: 1 }]}>
+          <Text style={styles.btnText}>마치기</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
-    page: { flex: 1, backgroundColor: 'white', paddingHorizontal: 24, paddingTop: 50 },
-    title: { fontSize: 18, fontWeight: 'bold', textAlign: 'center', marginBottom: 18, marginTop: 60 },
-    card: { backgroundColor: '#F5F5F5', borderRadius: 12, padding: 12, marginBottom: 16 },
-    meta: { fontSize: 13 },
-
-    readyBtn: { height: 48, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#3B82F6' },
-    readyText: { color: '#fff', fontWeight: '900', fontSize: 15 },
-
-    infoRow: { flexDirection: 'row', justifyContent: 'center', gap: 6, marginBottom: 10 },
-    infoText: { fontSize: 14, fontWeight: '800', color: '#111827' },
-
-    nowBox: { backgroundColor: '#EEF2FF', borderRadius: 16, padding: 16 },
-    nowLabel: { fontSize: 12, color: '#374151' },
-    nowTimer: { marginTop: 8, fontSize: 30, fontWeight: '900', color: '#111' },
-    btnRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
-    btn: { height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center', flex: 1 },
-    primary: { backgroundColor: '#059669' },
-    blue: { backgroundColor: '#3B82F6' },
-    gray: { backgroundColor: '#6B7280' },
-    btnText: { color: '#fff', fontWeight: '800' },
+  page: { flex: 1, backgroundColor: '#fff', paddingHorizontal: 24, paddingTop: 60 },
+  title: { fontSize: 20, fontWeight: '700', textAlign: 'center', marginBottom: 20 },
+  card: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: 14,
+    padding: 18,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    marginBottom: 20,
+  },
+  label: { fontSize: 13, color: '#6B7280', marginTop: 4 },
+  value: { fontSize: 15, color: '#111827', marginTop: 2 },
+  step: { fontSize: 12, color: '#9CA3AF', textAlign: 'right' },
+  subject: { textAlign: 'center', fontSize: 18, fontWeight: '700', marginTop: 20 },
+  detail: { textAlign: 'center', fontSize: 14, color: '#4B5563', marginTop: 8 },
+  timerBox: { alignItems: 'center', marginTop: 40 },
+  timer: { fontSize: 42, fontWeight: '900', color: '#111' },
+  btnRow: { flexDirection: 'row', gap: 8, marginTop: 30 },
+  btn: {
+    height: 46,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  primary: { backgroundColor: '#059669' },
+  blue: { backgroundColor: '#3B82F6' },
+  btnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
 });

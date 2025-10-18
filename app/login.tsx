@@ -31,7 +31,7 @@ export default function LoginPage() {
     }
     try {
       await signInWithEmailAndPassword(auth, email.trim(), pw);
-      router.push('/schedule');
+      router.push('/list');
     } catch (error: any) {
       Alert.alert('로그인 실패', error?.message ?? '다시 시도해주세요.');
     }
