@@ -4,7 +4,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { onAuthStateChanged } from "firebase/auth";
 import { doc, serverTimestamp, setDoc } from "firebase/firestore";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -22,33 +22,37 @@ import {
 type Priority = "필수" | "중요" | "선택";
 type Plan = {
   id: string;
-  subject: string;
-  content: string;
-  priority: Priority;
-  minutes: number;
-  done?: boolean;
+  subject: string; //과목
+  content: string; // 세부계획
+  priority: Priority; // 중요도
+  minutes: number; // 예상 소요 시간
+  done?: boolean; // 완료 여부
   createdAt?: string;
-};
+}; ///////// 이게 사용자가 입력한 공부 계획 //////
 
 export type PlannerBlock = {
-  start?: string; // "HH:mm"
+  start?: string; //
   title: string;
   subject?: string;
   priority?: Priority;
   minutes: number;
   note?: string; // 리스트가 올 수 있음
 };
+/////////이게 ai가 만들어준 일정표에 들어가는 값들 //////
 
 export type PlannerJSON = {
   summary?: string[];
   totalMinutes?: number;
   blocks: PlannerBlock[];
 };
+/// ai가  반환하는 구조 /////////
 
 /* =========================
  * 유틸: JSON 안전 파서
  * =======================*/
-function safeParsePlanner(input: string | undefined | null): PlannerJSON | null {
+function safeParsePlanner(
+  input: string | undefined | null
+): PlannerJSON | null {
   if (!input) return null;
   try {
     const codeBlock = input.match(/```json\s*([\s\S]*?)```/i);
@@ -65,10 +69,12 @@ function safeParsePlanner(input: string | undefined | null): PlannerJSON | null 
  * =======================*/
 function extractListItems(input: string): string[] {
   if (!input) return [];
-  // HTML <li>
-  const htmlMatches = Array.from(input.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)).map((m) =>
-    m[1].replace(/<[^>]+>/g, "").trim()
-  );
+  ///////입력값이 없으면 빈배열 ///////
+
+  const htmlMatches = Array.from(
+    input.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)
+  ).map((m) => m[1].replace(/<[^>]+>/g, "").trim()); ///// html 태그 중에 <li> 이런거 없애서 텍스트만 남게 하는 <li>"영어"</li> ---> "영어"
+
   // Markdown -, *
   const mdMatches = input
     .split(/\r?\n/)
@@ -77,31 +83,49 @@ function extractListItems(input: string): string[] {
     .map((l) => l.replace(/^[-*]\s+/, "").trim());
 
   const items = [...htmlMatches, ...mdMatches];
-  return Array.from(new Set(items)).filter(Boolean);
+  return Array.from(new Set(items)).filter(Boolean); ///// 리스트 합치고 중복 제거, 빈문자열 제거
 }
 
 function BulletList({ items }: { items: string[] }) {
-  if (!items || items.length === 0) return null;
+  if (!items || items.length === 0) return null; //빈배열 출력 x
   return (
     <View style={{ gap: 6 }}>
       {items.map((t, i) => (
-        <View key={`li-${i}`} style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
-          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: "#10B981", marginTop: 6 }} />
-          <Text style={{ color: "#111827", fontSize: 14, lineHeight: 20, flex: 1 }}>{t}</Text>
+        <View
+          key={`li-${i}`}
+          style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}
+        >
+          <View
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: 3,
+              backgroundColor: "#10B981",
+              marginTop: 6,
+            }}
+          />
+          <Text
+            style={{ color: "#111827", fontSize: 14, lineHeight: 20, flex: 1 }}
+          >
+            {t}
+          </Text>
         </View>
       ))}
     </View>
   );
-}
+} //////// ● 영어 단어 암기  이런식으로 출려되게 ////
 
 /* HTML 정리용 폴백 (리스트 외 태그 제거) */
 function stripHtml(s?: string): string {
   if (!s) return "";
-  return s.replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "").trim();
+  return s
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .trim();
 }
 
 /* =========================
- * 시간 계산 유틸 ("HH:mm" + minutes → "HH:mm")
+ * 시간 계산
  * =======================*/
 function addMinutesToHHmm(hhmm?: string, minutes?: number): string | null {
   if (!hhmm || typeof minutes !== "number") return null;
@@ -138,14 +162,10 @@ export default function SettingScreen() {
   const [aiRaw, setAiRaw] = useState("");
   const [aiJson, setAiJson] = useState<PlannerJSON | null>(null);
 
-  const hasPlan = !!aiJson && Array.isArray(aiJson.blocks) && aiJson.blocks.length > 0;
+  const hasPlan =
+    !!aiJson && Array.isArray(aiJson.blocks) && aiJson.blocks.length > 0;
 
-  const AI_ENDPOINT = useMemo(
-    () =>
-      process.env.EXPO_PUBLIC_AI_ENDPOINT ||
-      "https://chatwithai-aqyo5fjnda-uc.a.run.app",
-    []
-  );
+  const AI_ENDPOINT = process.env.EXPO_PUBLIC_AI_ENDPOINT || ''; // https://naver.com
 
   // 로그인 상태
   useEffect(() => {
@@ -180,6 +200,10 @@ export default function SettingScreen() {
       "- 각 블록의 추천 길이(분)와 순서 제안",
       "- 상단에 4~5줄 요약 포함",
       "- 하단에는 시간표 형태로 정리",
+      "아래 시간대에는 공부를 실행하지 않도록 해줘",
+      "- 평일 학교 가는 날 8:00 ~ 15:30 ",
+      "- 아침 : 7:00 ~ 8:00, 저녁 : 18:00 ~ 18:30", 
+      "- 취침 시각 23 : 00 ~",  
       "",
       "### 반환 형식",
       "1) 자연스러운 한국어 설명",
@@ -211,8 +235,7 @@ export default function SettingScreen() {
 
       const data = await res.json();
       const reply =
-        (data && (data.reply ?? data.result)) ||
-        JSON.stringify(data, null, 2);
+        (data && (data.reply ?? data.result)) || JSON.stringify(data, null, 2);
 
       const parsed = safeParsePlanner(reply);
       if (parsed) {
@@ -253,7 +276,7 @@ export default function SettingScreen() {
     if (auto === "1" && uid && !loading && !aiJson) {
       requestPlanner();
     }
-  }, [auto, uid, loading, aiJson]);
+  }, [auto, uid, loading, aiJson] );
 
   return (
     <View style={S.screen}>
@@ -301,7 +324,9 @@ export default function SettingScreen() {
         <View style={S.loadingWrap}>
           <View style={S.loadingBox}>
             <ActivityIndicator size="large" />
-            <Text style={{ marginTop: 12, fontWeight: "700" }}>플래너 생성 중…</Text>
+            <Text style={{ marginTop: 12, fontWeight: "700" }}>
+              플래너 생성 중…
+            </Text>
           </View>
         </View>
       </Modal>
@@ -332,7 +357,11 @@ function PlannerView({ data, raw }: { data: PlannerJSON; raw: string }) {
       <View
         style={[
           S.card,
-          { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+          {
+            flexDirection: "row",
+            justifyContent: "space-between",
+            alignItems: "center",
+          },
         ]}
       >
         <StatChip label="총 소요" value={`${total}분`} />
@@ -381,20 +410,27 @@ function PlannerList({ blocks }: { blocks: PlannerBlock[] }) {
     <View style={{ gap: 10 }}>
       {sorted.map((b, i) => {
         const timeLabel =
-          buildTimeRange(b.start, b.minutes) ?? (b.start ? b.start : `순서 ${i + 1}`);
+          buildTimeRange(b.start, b.minutes) ??
+          (b.start ? b.start : `순서 ${i + 1}`);
         const prColor = TAG_COLOR[b.priority || "선택"] || "#6B7280";
         return (
           <View key={`plan-${i}`} style={S.planCard}>
             <View style={S.rowBetween}>
               <Text style={S.timeText}>{timeLabel}</Text>
-              {b.priority ? <Text style={[S.priority, { color: prColor }]}>{b.priority}</Text> : null}
+              {b.priority ? (
+                <Text style={[S.priority, { color: prColor }]}>
+                  {b.priority}
+                </Text>
+              ) : null}
             </View>
             <Text style={S.subjectText}>{b.subject || "과목 없음"}</Text>
             <Text style={S.titleText}>{b.title}</Text>
             {typeof b.minutes === "number" ? (
               <Text style={S.minsText}>{b.minutes}분</Text>
             ) : null}
-            {b.note ? <Text style={S.noteText}>{stripHtml(b.note)}</Text> : null}
+            {b.note ? (
+              <Text style={S.noteText}>{stripHtml(b.note)}</Text>
+            ) : null}
           </View>
         );
       })}
@@ -420,15 +456,26 @@ function StatChip({ label, value }: { label: string; value: string }) {
 function RawFallbackView({ raw }: { raw: string }) {
   const items = extractListItems(raw);
   return (
-    <ScrollView style={S.result} contentContainerStyle={{ padding: 16 }} showsVerticalScrollIndicator={false}>
+    <ScrollView
+      style={S.result}
+      contentContainerStyle={{ padding: 16 }}
+      showsVerticalScrollIndicator={false}
+    >
       <View style={S.card}>
         <Text style={S.cardTitle}>AI 플래너</Text>
-        {items.length > 0 ? <BulletList items={items} /> : <Text style={S.rawText}>{stripHtml(raw)}</Text>}
+        {items.length > 0 ? (
+          <BulletList items={items} />
+        ) : (
+          <Text style={S.rawText}>{stripHtml(raw)}</Text>
+        )}
       </View>
-      <View style={[S.card, { backgroundColor: "#FFFBEB", borderColor: "#FDE68A" }]}>
+      <View
+        style={[S.card, { backgroundColor: "#FFFBEB", borderColor: "#FDE68A" }]}
+      >
         <Text style={[S.cardTitle, { marginBottom: 6 }]}>팁</Text>
         <Text style={S.cardText}>
-          AI가 일반 텍스트만 보내도 목록(-, * 또는 &lt;ul&gt;&lt;li&gt;)을 보기 좋게 렌더링합니다.
+          AI가 일반 텍스트만 보내도 목록(-, * 또는 &lt;ul&gt;&lt;li&gt;)을 보기
+          좋게 렌더링합니다.
         </Text>
       </View>
     </ScrollView>
@@ -449,7 +496,12 @@ function estimateDensity(totalMin: number) {
  * =======================*/
 const S = StyleSheet.create({
   screen: { flex: 1, backgroundColor: "#FFFFFF", padding: 20, paddingTop: 60 },
-  title: { fontSize: 22, fontWeight: "800", color: "#0F172A", marginBottom: 16 },
+  title: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#0F172A",
+    marginBottom: 16,
+  },
   btn: {
     height: 52,
     backgroundColor: "#2563EB",
@@ -464,7 +516,12 @@ const S = StyleSheet.create({
     elevation: 2,
   },
   btnDisabled: { opacity: 0.7 },
-  btnTxt: { color: "#fff", fontWeight: "900", fontSize: 16, letterSpacing: 0.3 },
+  btnTxt: {
+    color: "#fff",
+    fontWeight: "900",
+    fontSize: 16,
+    letterSpacing: 0.3,
+  },
 
   result: {
     marginTop: 8,
@@ -488,7 +545,12 @@ const S = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 },
     elevation: 1,
   },
-  cardTitle: { fontSize: 16, fontWeight: "800", color: "#0F172A", marginBottom: 8 },
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: "800",
+    color: "#0F172A",
+    marginBottom: 8,
+  },
   cardText: { color: "#111827", fontSize: 14, lineHeight: 20 },
 
   /* 통계칩 */
@@ -502,7 +564,12 @@ const S = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#E5E7EB",
   },
-  statLabel: { fontSize: 12, color: "#6B7280", marginBottom: 4, fontWeight: "600" },
+  statLabel: {
+    fontSize: 12,
+    color: "#6B7280",
+    marginBottom: 4,
+    fontWeight: "600",
+  },
   statValue: { fontSize: 16, color: "#111827", fontWeight: "800" },
 
   /* ✅ ul 카드 한 개 */
@@ -518,14 +585,22 @@ const S = StyleSheet.create({
     shadowOffset: { width: 0, height: 3 },
   },
   timeText: { fontSize: 15, fontWeight: "800", color: "#2563EB" },
-  subjectText: { fontSize: 16, fontWeight: "900", color: "#0F172A", marginTop: 6 },
+  subjectText: {
+    fontSize: 16,
+    fontWeight: "900",
+    color: "#0F172A",
+    marginTop: 6,
+  },
   titleText: { fontSize: 14, color: "#374151", marginTop: 4 },
   minsText: { fontSize: 12, fontWeight: "700", color: "#6B7280", marginTop: 2 },
   noteText: { fontSize: 13, color: "#6B7280", marginTop: 6 },
   priority: { fontWeight: "900" },
-  rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  rowBetween: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
 
-  /* ✅ 빠져서 에러 나던 rawText 복구 */
   rawText: { color: "#111827", fontSize: 13, lineHeight: 19 },
 
   /* 로딩 오버레이 */

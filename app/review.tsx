@@ -1,13 +1,27 @@
 // app/review.tsx
-import { auth } from '@/firebaseConfig';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useRouter } from 'expo-router';
-import { onAuthStateChanged } from 'firebase/auth';
-import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { auth, db } from "@/firebaseConfig";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useRouter } from "expo-router";
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, serverTimestamp, setDoc } from "firebase/firestore";
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  Alert,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
 
-type Priority = '필수' | '중요' | '선택';
-type Phase = 'study' | 'cooldown';
+export type feedbackJSON = {
+  summary?: string[];
+  insights?: string[];
+};
+
+type Priority = "필수" | "중요" | "선택";
+type Phase = "study" | "cooldown";
 
 type StudyRecordDraft = {
   phase: Phase;
@@ -31,19 +45,17 @@ type PlanItem = {
   cooldownMinutes?: number;
 };
 
-const DRAFT_KEY = '@studyRecordsDraftV1';
-const PLAN_KEY = '@aiPlanV1';
+const DRAFT_KEY = "@studyRecordsDraftV1";
+const PLAN_KEY = "@aiPlanV1";
 
-const LAST_SUMMARY_KEY = '@lastSummaryV1';
+const LAST_SUMMARY_KEY = "@lastSummaryV1";
 
-const feelingsList = [
-  '집중됨', '피곤', '졸림', '재밌었음', '어려웠음', '지루함', '보통', '만족', '아쉬움'
-] as const;
-type Feeling = typeof feelingsList[number];
+const feelingsList = ["집중 잘됨", "시간 남았음", "피곤함", "괜찮음"] as const;
+type Feeling = (typeof feelingsList)[number];
 
-type GoalStatus = 'full' | 'partial' | 'none';
-type TimeSlotOK = 'good' | 'ok' | 'bad';          // 좋았다/괜찮았다/집중 안 됨
-type TimeAllocOK = 'adequate' | 'insufficient' | 'leftover'; // 적절/부족/남음
+type GoalStatus = "full" | "partial" | "none";
+type TimeSlotOK = "good" | "ok" | "bad"; // 좋았다/괜찮았다/집중 안 됨
+type TimeAllocOK = "adequate" | "insufficient" | "leftover"; // 적절/부족/남음
 
 export default function SummaryScreen() {
   const router = useRouter();
@@ -69,19 +81,30 @@ export default function SummaryScreen() {
         setPlan(arr);
       } catch (e) {
         console.error(e);
-        Alert.alert('오류', '기록을 불러오는 중 문제가 발생했어요.');
+        Alert.alert("오류", "기록을 불러오는 중 문제가 발생했어요.");
       }
     })();
   }, []);
 
   // 통계 계산
   const stats = useMemo(() => {
-    const totalPlannedMin = drafts.reduce((acc, r) => acc + (r.phase === 'study' ? (r.plannedMinutes || 0) : 0), 0);
-    const totalElapsedSec = drafts.reduce((acc, r) => acc + (r.phase === 'study' ? (r.elapsedSeconds || 0) : 0), 0);
-    const totalCompleted = drafts.filter((r) => r.phase === 'study' && r.completed).length;
-    const totalStudySteps = drafts.filter((r) => r.phase === 'study').length;
+    const totalPlannedMin = drafts.reduce(
+      (acc, r) => acc + (r.phase === "study" ? r.plannedMinutes || 0 : 0),
+      0
+    );
+    const totalElapsedSec = drafts.reduce(
+      (acc, r) => acc + (r.phase === "study" ? r.elapsedSeconds || 0 : 0),
+      0
+    );
+    const totalCompleted = drafts.filter(
+      (r) => r.phase === "study" && r.completed
+    ).length;
+    const totalStudySteps = drafts.filter((r) => r.phase === "study").length;
 
-    const completionRate = totalStudySteps > 0 ? Math.round((totalCompleted / totalStudySteps) * 100) : 0;
+    const completionRate =
+      totalStudySteps > 0
+        ? Math.round((totalCompleted / totalStudySteps) * 100)
+        : 0;
 
     return {
       totalPlannedMin,
@@ -95,20 +118,22 @@ export default function SummaryScreen() {
   // ===== 후기 입력 상태 =====
   const [stars, setStars] = useState<number>(0); // 집중도 1~5
   const [feelings, setFeelings] = useState<Feeling[]>([]);
-  const [goalStatus, setGoalStatus] = useState<GoalStatus>('partial');
-  const [timeSlot, setTimeSlot] = useState<TimeSlotOK>('ok');
-  const [timeAlloc, setTimeAlloc] = useState<TimeAllocOK>('adequate');
-  const [memo, setMemo] = useState<string>('');
+  const [goalStatus, setGoalStatus] = useState<GoalStatus>("partial");
+  const [timeSlot, setTimeSlot] = useState<TimeSlotOK>("ok");
+  const [timeAlloc, setTimeAlloc] = useState<TimeAllocOK>("adequate");
+  const [memo, setMemo] = useState<string>("");
 
   const toggleFeeling = (f: Feeling) => {
-    setFeelings((prev) => (prev.includes(f) ? prev.filter((x) => x !== f) : [...prev, f]));
+    setFeelings((prev) =>
+      prev.includes(f) ? prev.filter((x) => x !== f) : [...prev, f]
+    );
   };
 
   // ===== 제출 =====
   async function onSubmit() {
     try {
       if (stars <= 0) {
-        Alert.alert('확인', '집중도(별점)를 선택해 주세요.');
+        Alert.alert("확인", "집중도(별점)를 선택해 주세요.");
         return;
       }
 
@@ -119,12 +144,12 @@ export default function SummaryScreen() {
         summary: {
           focusStars: stars,
           feelings,
-          goalStatus,  // 'full' | 'partial' | 'none'
-          timeSlot,    // 'good' | 'ok' | 'bad'
-          timeAlloc,   // 'adequate' | 'insufficient' | 'leftover'
+          goalStatus, // 'full' | 'partial' | 'none'
+          timeSlot, // 'good' | 'ok' | 'bad'
+          timeAlloc, // 'adequate' | 'insufficient' | 'leftover'
           memo,
         },
-        plan,   // 원래 계획(과목/세부계획/분/우선순위 등)
+        plan, // 원래 계획(과목/세부계획/분/우선순위 등)
         drafts, // 실제 실행 기록(공부/쿨다운, 경과/완료 등)
         stats: {
           totalPlannedMin: stats.totalPlannedMin,
@@ -142,13 +167,31 @@ export default function SummaryScreen() {
       const endpoint = process.env.EXPO_PUBLIC_AI_ENDPOINT;
       if (endpoint) {
         try {
-          await fetch(`${endpoint}/summary`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
+          const res = await fetch(`${endpoint}/summary`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify([
+              {
+                payload,
+              },
+            ]),
           });
+          const data = await res.json();
+          console.log(data)
+          if (!uid || !data) return;
+          await setDoc(doc(db, "feedback", uid), {
+            aifeedback: data,
+            payload: payload,
+            creatdAt: serverTimestamp(),
+          });
+
+          await AsyncStorage.removeItem(DRAFT_KEY);
+
+          Alert.alert("저장 완료", "후기를 저장했어요!", [
+            { text: "확인", onPress: () => router.replace("/feedback" as any) },
+          ]);
         } catch (e) {
-          console.warn('AI 전송 실패(무시 가능):', e);
+          console.warn("AI 전송 실패(무시 가능):", e);
         }
       }
 
@@ -161,46 +204,49 @@ export default function SummaryScreen() {
       //     ...payload,
       //   });
       // }
-
-      // 사용한 Draft 초기화 (원하면 남겨도 됨)
-      await AsyncStorage.removeItem(DRAFT_KEY);
-
-      Alert.alert('저장 완료', '후기를 저장했어요!', [
-        { text: '확인', onPress: () => router.replace('/home' as any) },
-      ]);
     } catch (e) {
       console.error(e);
-      Alert.alert('오류', '제출 중 문제가 발생했어요.');
+      Alert.alert("오류", "제출 중 문제가 발생했어요.");
     }
-  }
-
-  // 형식 유틸
-  function mmss(sec: number) {
-    const m = Math.floor(Math.max(0, sec) / 60);
-    const s = Math.max(0, sec) % 60;
-    return `${m}분 ${String(s).padStart(2, '0')}초`;
   }
 
   // ===== UI =====
   return (
-    <ScrollView style={styles.page} contentContainerStyle={{ paddingBottom: 40 }}>
-      <Text style={styles.title}>오늘 공부 요약 & 후기</Text>
+    <ScrollView
+      style={styles.page}
+      contentContainerStyle={{ paddingBottom: 40 }}
+    >
+      <Text style={styles.title}>오늘 공부 요약 & 후기</Text> 
+
 
       {/* 상단 요약 카드 */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>오늘의 요약</Text>
-        <Text style={styles.meta}>계획(공부) 합계: {stats.totalPlannedMin}분</Text>
-        <Text style={styles.meta}>실제 공부: {mmss(stats.totalElapsedSec)}</Text>
-        <Text style={styles.meta}>완료율: {stats.completionRate}% ({stats.totalCompleted}/{stats.totalStudySteps})</Text>
+        <Text style={styles.meta}>
+          계획(공부) 합계: {stats.totalPlannedMin}분
+        </Text>
+       
+        <Text style={styles.meta}>
+          완료율: {stats.completionRate}% ({stats.totalCompleted}/
+          {stats.totalStudySteps})
+        </Text>
       </View>
+
+      
 
       {/* 집중도(별점) */}
       <View style={styles.card}>
         <Text style={styles.label}>집중도</Text>
         <View style={styles.starRow}>
-          {[1,2,3,4,5].map((n) => (
-            <TouchableOpacity key={n} onPress={() => setStars(n)} style={styles.starBtn}>
-              <Text style={[styles.star, { opacity: n <= stars ? 1 : 0.35 }]}>{'★'}</Text>
+          {[1, 2, 3, 4, 5].map((n) => (
+            <TouchableOpacity
+              key={n}
+              onPress={() => setStars(n)}
+              style={styles.starBtn}
+            >
+              <Text style={[styles.star, { opacity: n <= stars ? 1 : 0.35 }]}>
+                {"★"}
+              </Text>
             </TouchableOpacity>
           ))}
         </View>
@@ -218,7 +264,11 @@ export default function SummaryScreen() {
                 onPress={() => toggleFeeling(f)}
                 style={[styles.chip, active && styles.chipActive]}
               >
-                <Text style={[styles.chipText, active && styles.chipTextActive]}>{f}</Text>
+                <Text
+                  style={[styles.chipText, active && styles.chipTextActive]}
+                >
+                  {f}
+                </Text>
               </TouchableOpacity>
             );
           })}
@@ -229,9 +279,24 @@ export default function SummaryScreen() {
       <View style={styles.card}>
         <Text style={styles.label}>목표 달성 여부</Text>
         <View style={styles.row3}>
-          <RadioBtn label="완료" value="full"    current={goalStatus} onChange={setGoalStatus} />
-          <RadioBtn label="부분" value="partial" current={goalStatus} onChange={setGoalStatus} />
-          <RadioBtn label="미달" value="none"    current={goalStatus} onChange={setGoalStatus} />
+          <RadioBtn
+            label="완전히 달성"
+            value="full"
+            current={goalStatus}
+            onChange={setGoalStatus}
+          />
+          <RadioBtn
+            label=" 일부 달성"
+            value="partial"
+            current={goalStatus}
+            onChange={setGoalStatus}
+          />
+          <RadioBtn
+            label="미달성"
+            value="none"
+            current={goalStatus}
+            onChange={setGoalStatus}
+          />
         </View>
       </View>
 
@@ -239,9 +304,24 @@ export default function SummaryScreen() {
       <View style={styles.card}>
         <Text style={styles.label}>시간대가 적절했는지</Text>
         <View style={styles.row3}>
-          <RadioBtn label="좋았다"     value="good" current={timeSlot} onChange={setTimeSlot} />
-          <RadioBtn label="괜찮았다"   value="ok"   current={timeSlot} onChange={setTimeSlot} />
-          <RadioBtn label="집중 안 됨" value="bad"  current={timeSlot} onChange={setTimeSlot} />
+          <RadioBtn
+            label="좋았다"
+            value="good"
+            current={timeSlot}
+            onChange={setTimeSlot}
+          />
+          <RadioBtn
+            label="괜찮았다"
+            value="ok"
+            current={timeSlot}
+            onChange={setTimeSlot}
+          />
+          <RadioBtn
+            label="집중 안 되었다"
+            value="bad"
+            current={timeSlot}
+            onChange={setTimeSlot}
+          />
         </View>
       </View>
 
@@ -249,15 +329,30 @@ export default function SummaryScreen() {
       <View style={styles.card}>
         <Text style={styles.label}>시간 배분이 적절했는지</Text>
         <View style={styles.row3}>
-          <RadioBtn label="적절" value="adequate"     current={timeAlloc} onChange={setTimeAlloc} />
-          <RadioBtn label="부족" value="insufficient" current={timeAlloc} onChange={setTimeAlloc} />
-          <RadioBtn label="남음" value="leftover"     current={timeAlloc} onChange={setTimeAlloc} />
+          <RadioBtn
+            label="적절함"
+            value="adequate"
+            current={timeAlloc}
+            onChange={setTimeAlloc}
+          />
+          <RadioBtn
+            label="부족함"
+            value="insufficient"
+            current={timeAlloc}
+            onChange={setTimeAlloc}
+          />
+          <RadioBtn
+            label="남았음"
+            value="leftover"
+            current={timeAlloc}
+            onChange={setTimeAlloc}
+          />
         </View>
       </View>
 
       {/* 리뷰 메모 */}
       <View style={styles.card}>
-        <Text style={styles.label}>한 줄 리뷰 / 개선점</Text>
+        <Text style={styles.label}>개선점</Text>
         <TextInput
           placeholder="예) 밤 10시 이후 집중이 떨어져요. 내일은 수학 먼저!"
           value={memo}
@@ -271,7 +366,10 @@ export default function SummaryScreen() {
         <Text style={styles.btnText}>제출하고 완료하기</Text>
       </TouchableOpacity>
 
-      <TouchableOpacity onPress={() => router.replace('/home' as any)} style={[styles.btn, styles.gray, { marginTop: 10 }]}>
+      <TouchableOpacity
+        onPress={() => router.replace("/home" as any)}
+        style={[styles.btn, styles.gray, { marginTop: 10 }]}
+      >
         <Text style={styles.btnText}>나중에 할게요(홈으로)</Text>
       </TouchableOpacity>
     </ScrollView>
@@ -280,46 +378,104 @@ export default function SummaryScreen() {
 
 /* 라디오 버튼(텍스트 버전) */
 function RadioBtn<T extends string>({
-  label, value, current, onChange,
-}: { label: string; value: T; current: T; onChange: (v: T) => void }) {
+  label,
+  value,
+  current,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  current: T;
+  onChange: (v: T) => void;
+}) {
   const active = current === value;
   return (
-    <TouchableOpacity onPress={() => onChange(value)} style={[styles.radio, active && styles.radioActive]}>
-      <Text style={[styles.radioText, active && styles.radioTextActive]}>{label}</Text>
+    <TouchableOpacity
+      onPress={() => onChange(value)}
+      style={[styles.radio, active && styles.radioActive]}
+    >
+      <Text style={[styles.radioText, active && styles.radioTextActive]}>
+        {label}
+      </Text>
     </TouchableOpacity>
   );
 }
 
 const styles = StyleSheet.create({
-  page: { flex: 1, backgroundColor: '#FFFFFF', paddingHorizontal: 20, paddingTop: 24 },
-  title: { fontSize: 18, fontWeight: 'bold', textAlign: 'center', marginBottom: 14 },
+  page: {
+    flex: 1,
+    backgroundColor: "#FFFFFF",
+    paddingHorizontal: 20,
+    paddingTop: 24,
+  },
+  title: {
+    fontSize: 18,
+    fontWeight: "bold",
+    textAlign: "center",
+    marginBottom: 14,
+  },
 
-  card: { backgroundColor: '#F8FAFC', borderRadius: 14, padding: 14, marginBottom: 12, borderWidth: 1, borderColor: '#E5E7EB' },
-  cardTitle: { fontSize: 14, fontWeight: '800', marginBottom: 6, color: '#0F172A' },
+  card: {
+    backgroundColor: "#F8FAFC",
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+  },
+  cardTitle: {
+    fontSize: 14,
+    fontWeight: "800",
+    marginBottom: 6,
+    color: "#0F172A",
+  },
 
-  label: { fontSize: 12, color: '#6B7280', marginBottom: 8 },
-  meta: { fontSize: 13, color: '#334155', marginBottom: 4 },
+  label: { fontSize: 12, color: "#6B7280", marginBottom: 8 },
+  meta: { fontSize: 13, color: "#334155", marginBottom: 4 },
 
-  starRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  starRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   starBtn: { paddingVertical: 6, paddingHorizontal: 4 },
-  star: { fontSize: 28, textAlign: 'center' },
+  star: { fontSize: 28, textAlign: "center" },
 
-  chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16, backgroundColor: '#E5E7EB' },
-  chipActive: { backgroundColor: '#3B82F6' },
-  chipText: { fontSize: 12, color: '#1F2937' },
-  chipTextActive: { color: '#FFFFFF', fontWeight: '700' },
+  chipWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: "#E5E7EB",
+  },
+  chipActive: { backgroundColor: "#3B82F6" },
+  chipText: { fontSize: 12, color: "#1F2937" },
+  chipTextActive: { color: "#FFFFFF", fontWeight: "700" },
 
-  row3: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
-  radio: { paddingHorizontal: 12, paddingVertical: 10, borderRadius: 12, backgroundColor: '#E5E7EB' },
-  radioActive: { backgroundColor: '#059669' },
-  radioText: { fontSize: 13, color: '#1F2937' },
-  radioTextActive: { color: '#FFFFFF', fontWeight: '800' },
+  row3: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  radio: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: "#E5E7EB",
+  },
+  radioActive: { backgroundColor: "#059669" },
+  radioText: { fontSize: 13, color: "#1F2937" },
+  radioTextActive: { color: "#FFFFFF", fontWeight: "800" },
 
-  input: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 10, padding: 12, minHeight: 60, fontSize: 13 },
+  input: {
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+    borderRadius: 10,
+    padding: 12,
+    minHeight: 60,
+    fontSize: 13,
+  },
 
-  btn: { height: 48, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-  primary: { backgroundColor: '#059669' },
-  gray: { backgroundColor: '#6B7280' },
-  btnText: { color: '#FFFFFF', fontWeight: '800' },
+  btn: {
+    height: 48,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  primary: { backgroundColor: "#059669" },
+  gray: { backgroundColor: "#6B7280" },
+  btnText: { color: "#FFFFFF", fontWeight: "800" },
 });
